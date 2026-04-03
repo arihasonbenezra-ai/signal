@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useMemo } from "react";
+import { useState, useRef, useEffect, useMemo, useCallback } from "react";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell } from "recharts";
 
 const T = {
@@ -30,6 +30,17 @@ function isDeptCol(h) { return /department|dept|division|department.head|busines
 function isRoleCol(h) { return /job.req|requisition|position|role|title/i.test(h); }
 function isNumericCol(vals) { return vals.length > 0 && vals.filter(v=>typeof v==="number").length/vals.length > 0.75; }
 function isTotalCol(h) { return /total|sum|grand/i.test(h); }
+/** Match AI/spreadsheet column names to actual row keys (spacing, casing, "Primary …"). */
+function rowValueForColumn(row, col, headerList) {
+  if (!row || !col) return undefined;
+  if (Object.prototype.hasOwnProperty.call(row, col)) return row[col];
+  const lc = (s) => String(s).trim().toLowerCase();
+  const hit = headerList.find((h) => h && lc(h) === lc(col));
+  if (hit && row[hit] !== undefined) return row[hit];
+  const sub = headerList.find((h) => h && (lc(h).includes(lc(col)) || lc(col).includes(lc(h))));
+  if (sub && row[sub] !== undefined) return row[sub];
+  return undefined;
+}
 function shortStage(s) {
   return s.replace(/Recruiter Screen/i,"Screen").replace(/Hiring Manager Screen/i,"HM Screen")
     .replace(/Virtual Interview/i,"Virtual").replace(/Onsite Interview/i,"Onsite")
@@ -294,26 +305,20 @@ export default function Signal() {
       if (!vals.length) return false;
       if (isNumericCol(vals)) return false;
       const unique = new Set(vals.map(String));
-      return unique.size >= 2 && unique.size <= 25;
+      return unique.size >= 2 && unique.size <= 40;
     });
-    const pick = (fn) => catCols.find(fn);
-    const notIn = (arr) => (h) => h && !arr.includes(h);
-    if (isPipelineReport) {
-      const rec = pick(h=>isRecruiterCol(h));
-      const dept = pick(h=>isDeptCol(h)&&h!==rec);
-      const role = pick(h=>isRoleCol(h)&&h!==rec&&h!==dept);
-      const extra = catCols.filter(notIn([rec,dept,role])).filter(h=>/review|stage|status|priority|confidential|type|disposition|hm|manager/i.test(h)).slice(0,3);
-      const base = [rec,dept,role].filter(Boolean);
-      return [...base,...extra].filter((h,i,a)=>a.indexOf(h)===i).slice(0,6);
-    }
-    const rec = pick(h=>isRecruiterCol(h));
-    const status = pick(h=>isStatusCol(h));
-    const loc = pick(h=>/location|city|office|site/i.test(h));
-    const reviewish = pick(h=>h!==rec&&h!==status&&h!==loc&&/review|stage|priority|confidential|type|disposition|hm|manager|recruit|opening|req/i.test(h));
-    const base = [rec,status,loc,reviewish].filter(Boolean);
-    const rest = catCols.filter(notIn(base)).slice(0, Math.max(0, 6-base.length));
-    return [...base,...rest].filter((h,i,a)=>a.indexOf(h)===i).slice(0,6);
-  },[headers, data, analysis, isPipelineReport]);
+    const score = (h) => {
+      let s = 0;
+      if (isRecruiterCol(h)) s += 10;
+      if (isStatusCol(h)) s += 9;
+      if (isDeptCol(h)) s += 7;
+      if (isRoleCol(h)) s += 6;
+      if (/review|stage|priority|confidential|disposition|type|hm|manager|opening|req/i.test(h)) s += 5;
+      if (/location|city|office|site/i.test(h)) s += 4;
+      return s;
+    };
+    return [...catCols].sort((a,b)=>score(b)-score(a)).slice(0, 8);
+  },[headers, data, analysis]);
 
   // ─── DERIVED: filtered data ───────────────────────────────────────────────
   const filteredData = useMemo(()=>{
@@ -359,7 +364,8 @@ export default function Signal() {
     if (isPipelineReport && pipelineNumericCols.length) {
       const groups = {};
       filteredData.forEach(row=>{
-        const key = String(row[xk]||"Unknown");
+        const cell = rowValueForColumn(row, xk, headers) ?? row[xk];
+        const key = String(cell ?? "Unknown");
         if (!groups[key]) { groups[key]={[xk]:key}; pipelineNumericCols.forEach(c=>{groups[key][shortStage(c)]=0;}); }
         pipelineNumericCols.forEach(c=>{ groups[key][shortStage(c)]+=(Number(row[c])||0); });
       });
@@ -371,12 +377,13 @@ export default function Signal() {
     }
     const groups = {};
     filteredData.forEach(row=>{
-      const rawKey = isStatusCol(xk)?normalizeStatus(String(row[xk]||"")):String(row[xk]||"Unknown");
+      const cell = rowValueForColumn(row, xk, headers) ?? row[xk];
+      const rawKey = isStatusCol(xk)?normalizeStatus(String(cell ?? "")):String(cell ?? "Unknown");
       if (!groups[rawKey]) groups[rawKey]={[xk]:rawKey,Count:0};
       groups[rawKey].Count+=1;
     });
     return Object.values(groups).sort((a,b)=>b.Count-a.Count).slice(0,20);
-  },[filteredData, analysis, chartXKey, isPipelineReport, pipelineNumericCols]);
+  },[filteredData, analysis, chartXKey, isPipelineReport, pipelineNumericCols, headers]);
 
   // ─── DERIVED: summary cards ───────────────────────────────────────────────
   const summaryCards = useMemo(()=>{
@@ -401,29 +408,55 @@ export default function Signal() {
     }
     const rec = headers.find(h=>isRecruiterCol(h));
     const status = headers.find(h=>isStatusCol(h));
-    if (!rec) return [];
-    const recruiters = [...new Set(filteredData.map(r=>String(r[rec]||"")))].filter(Boolean).sort();
-    return recruiters.map(r=>{
-      const rows = filteredData.filter(row=>String(row[rec]||"")===r);
-      const sg = {};
-      rows.forEach(row=>{ const s=status?normalizeStatus(String(row[status]||"")):"Unknown"; sg[s]=(sg[s]||0)+1; });
-      return {recruiter:r.replace(/Primary /i,""),total:rows.length,statuses:sg};
+    if (rec) {
+      const recruiters = [...new Set(filteredData.map(r=>String(r[rec]||"")))].filter(Boolean).sort();
+      return recruiters.map(r=>{
+        const rows = filteredData.filter(row=>String(row[rec]||"")===r);
+        const sg = {};
+        rows.forEach(row=>{ const s=status?normalizeStatus(String(row[status]||"")):"Unknown"; sg[s]=(sg[s]||0)+1; });
+        return {recruiter:r.replace(/Primary /i,""),total:rows.length,statuses:sg};
+      });
+    }
+    const gk = chartXKey || analysis?.xKey || headers.find(Boolean);
+    if (!gk) return [];
+    const tally = {};
+    filteredData.forEach((row) => {
+      const raw = rowValueForColumn(row, gk, headers) ?? row[gk];
+      const k = String(raw ?? "Unknown");
+      tally[k]=(tally[k]||0)+1;
     });
-  },[filteredData,analysis,headers,isPipelineReport,pipelineNumericCols]);
+    return Object.entries(tally).sort((a,b)=>b[1]-a[1]).map(([label,total])=>({
+      recruiter: label,
+      total,
+      statuses: { "Rows": total },
+    }));
+  },[filteredData,analysis,headers,isPipelineReport,pipelineNumericCols,chartXKey]);
 
-  /** Table columns for drill-down: prefer sheet column order; fallback if row keys were empty. */
-  const drillTableCols = useMemo(()=>{
+  /** Table columns: sheet order first, then any extra keys present on rows. */
+  const drillTableCols = useMemo(() => {
     if (!drillDown?.rows?.length) return [];
     const keysFromRows = new Set();
     drillDown.rows.forEach((r) => {
       if (r && typeof r === "object") Object.keys(r).forEach((k) => keysFromRows.add(k));
     });
     const ordered = headers.filter((h) => h && keysFromRows.has(h));
-    if (ordered.length) return ordered.slice(0, 16);
-    const adhoc = [...keysFromRows];
-    if (adhoc.length) return adhoc.slice(0, 16);
-    return headers.filter(Boolean).slice(0, 16);
+    const rest = [...keysFromRows].filter((k) => !ordered.includes(k));
+    return [...ordered, ...rest].slice(0, 20);
   }, [drillDown, headers]);
+
+  const openDrillForLabel = useCallback((labelStr) => {
+    if (!analysis || labelStr == null || labelStr === "") return;
+    const xk = chartXKey;
+    if (!xk) return;
+    const want = isStatusCol(xk) ? normalizeStatus(String(labelStr)) : String(labelStr);
+    const rows = filteredData.filter((r) => {
+      const raw = rowValueForColumn(r, xk, headers) ?? r[xk];
+      if (raw == null && raw !== 0) return false;
+      const val = isStatusCol(xk) ? normalizeStatus(String(raw)) : String(raw);
+      return val === want;
+    });
+    if (rows.length) setDrillDown({ label: want, rows, isRecruiter: isRecruiterCol(xk) || isDeptCol(xk) });
+  }, [analysis, chartXKey, filteredData, headers]);
 
   // ─── PROCESSING ───────────────────────────────────────────────────────────
   const startProc = () => {
@@ -533,22 +566,23 @@ xKey and yKeys must be exact column names from the dataset.`}]
     setAsking(false);
   };
 
-  // Recharts 3: BarChart-level onClick passes (state, event), not bar payload — handle clicks on <Bar> instead.
-  const handleBarClick = (entry, index) => {
+  const handleBarClick = (barData, index) => {
     if (!analysis) return;
     const xk = chartXKey;
-    const payload = entry?.payload ?? entry;
-    let raw = payload?.[xk];
+    const payload = barData?.payload ?? barData;
+    const row = typeof payload === "object" && payload !== null ? payload : {};
+    let raw = rowValueForColumn(row, xk, headers) ?? row[xk];
     if ((raw == null || raw === "") && typeof index === "number" && chartData[index]) {
-      raw = chartData[index][xk];
+      const c = chartData[index];
+      raw = rowValueForColumn(c, xk, headers) ?? c[xk];
+    }
+    if ((raw == null || raw === "") && barData?.originalDataIndex != null && chartData[barData.originalDataIndex]) {
+      const c = chartData[barData.originalDataIndex];
+      raw = rowValueForColumn(c, xk, headers) ?? c[xk];
     }
     if (raw == null && raw !== 0) return;
     const label = isStatusCol(xk) ? normalizeStatus(String(raw)) : String(raw);
-    const rows = filteredData.filter((r) => {
-      const val = isStatusCol(xk) ? normalizeStatus(String(r[xk] || "")) : String(r[xk] || "");
-      return val === label;
-    });
-    if (rows.length) setDrillDown({ label, rows, isRecruiter: isRecruiterCol(xk) || isDeptCol(xk) });
+    openDrillForLabel(label);
   };
 
   const renderChart = () => {
@@ -559,13 +593,17 @@ xKey and yKeys must be exact column names from the dataset.`}]
     const barKeys = isPipelineReport ? pipelineNumericCols.map(c=>shortStage(c)) : ["Count"];
     return (
       <ResponsiveContainer width="100%" height={300}>
-        <BarChart data={chartData} margin={{top:isPipelineReport?8:5,right:8,left:-15,bottom:isPipelineReport?90:70}} style={{cursor:"pointer"}}>
+        <BarChart data={chartData} margin={{top:isPipelineReport?8:5,right:8,left:-15,bottom:isPipelineReport?90:70}} style={{cursor:"pointer"}}
+          onClick={(state) => {
+            const lab = state?.activeLabel;
+            if (lab != null && lab !== "") openDrillForLabel(String(lab));
+          }}>
           <CartesianGrid strokeDasharray="3 3" stroke={T.border}/>
           <XAxis dataKey={xk} {...ax} angle={-40} textAnchor="end" interval={0}/>
           <YAxis {...ax}/>
           <Tooltip {...tt}/>
           {barKeys.length>1&&<Legend verticalAlign="top" wrapperStyle={{fontFamily:"Inter,sans-serif",fontSize:10,color:T.muted,paddingBottom:8}}/>}
-          {barKeys.map((k,i)=><Bar key={k} dataKey={k} fill={(isPipelineReport?T.pipeline:T.chart)[i%(isPipelineReport?T.pipeline:T.chart).length]} stackId="s" radius={i===barKeys.length-1?[3,3,0,0]:[0,0,0,0]} style={{cursor:"pointer"}} onClick={(data, idx)=>handleBarClick(data, idx)}/>)}
+          {barKeys.map((k,i)=><Bar key={k} dataKey={k} fill={(isPipelineReport?T.pipeline:T.chart)[i%(isPipelineReport?T.pipeline:T.chart).length]} stackId="s" radius={i===barKeys.length-1?[3,3,0,0]:[0,0,0,0]} style={{cursor:"pointer"}} onClick={(data, idx, _e)=>handleBarClick(data, idx)}/>)}
         </BarChart>
       </ResponsiveContainer>
     );
@@ -786,7 +824,24 @@ xKey and yKeys must be exact column names from the dataset.`}]
           {viewMode==="chart"?(
             <div style={{padding:"14px 8px 8px",background:`linear-gradient(180deg, rgba(246,247,245,0.5) 0%, ${T.card} 28%)`}}>
               {renderChart()}
-              {chartData.length>0&&<div style={{fontSize:11,color:T.dim,textAlign:"center",marginTop:4,paddingBottom:6}}>Click a bar to preview matching rows below</div>}
+              {chartData.length>0&&(
+                <>
+                  <div style={{fontSize:11,color:T.dim,textAlign:"center",marginTop:4,paddingBottom:8}}>Click a bar, the chart background, or a name below to preview rows.</div>
+                  <div style={{display:"flex",flexWrap:"wrap",gap:8,padding:"4px 12px 14px",justifyContent:"center"}}>
+                    {chartData.map((row, i) => {
+                      const xk = chartXKey;
+                      const lab = rowValueForColumn(row, xk, headers) ?? row[xk];
+                      const n = isPipelineReport ? pipelineNumericCols.reduce((s,c)=>s+(Number(row[shortStage(c)])||0),0) : (row.Count ?? 0);
+                      return (
+                        <button key={i} type="button" onClick={()=>openDrillForLabel(String(lab))}
+                          style={{background:T.surface,border:`1px solid ${T.border}`,borderRadius:20,padding:"6px 12px",fontSize:12,cursor:"pointer",fontFamily:"Inter,sans-serif",color:T.text}}>
+                          {String(lab)} <span style={{color:T.muted}}>({n})</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </>
+              )}
             </div>
           ):(
             <div style={{padding:"14px 16px 18px",display:"flex",flexDirection:"column",gap:10,maxHeight:480,overflowY:"auto"}}>
@@ -859,7 +914,7 @@ xKey and yKeys must be exact column names from the dataset.`}]
                   <thead><tr style={{background:T.surface}}>{drillTableCols.map(c=><th key={c} style={{padding:"8px 14px",textAlign:"left",fontWeight:600,color:T.muted,borderBottom:`1px solid ${T.border}`,whiteSpace:"nowrap",fontSize:11}}>{c}</th>)}</tr></thead>
                   <tbody>{drillDown.rows.slice(0,25).map((row,i)=>(
                     <tr key={i} className="dr" style={{borderBottom:`1px solid ${T.border}`}}>
-                      {drillTableCols.map(c=><td key={c} style={{padding:"8px 14px",color:T.text,whiteSpace:"nowrap",maxWidth:280,overflow:"hidden",textOverflow:"ellipsis",background:"transparent",transition:"background .1s"}} title={String(row[c]??"")}>{String(row[c]??"—")}</td>)}
+                      {drillTableCols.map(c=><td key={c} style={{padding:"8px 14px",color:T.text,whiteSpace:"nowrap",maxWidth:280,overflow:"hidden",textOverflow:"ellipsis",background:"transparent",transition:"background .1s"}} title={String(rowValueForColumn(row,c,headers)??row[c]??"")}>{String(rowValueForColumn(row,c,headers)??row[c]??"—")}</td>)}
                     </tr>
                   ))}</tbody>
                 </table>
