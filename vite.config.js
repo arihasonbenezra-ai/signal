@@ -13,7 +13,7 @@ export default defineConfig(({ mode }) => {
   return {
     plugins: [react()],
     server: {
-      // Block dev static middleware from serving api/** (proxy still handles /api/anthropic first).
+      // Block dev static middleware from serving api/** (proxy still handles /api/chat first).
       fs: {
         deny: [
           ".env",
@@ -24,11 +24,11 @@ export default defineConfig(({ mode }) => {
         ],
       },
       proxy: {
-        "/api/anthropic": {
+        "/api/chat": {
           target: "https://api.anthropic.com",
           changeOrigin: true,
           secure: true,
-          rewrite: (path) => path.replace(/^\/api\/anthropic/, ""),
+          rewrite: (path) => path.replace(/^\/api\/chat/, "/v1/messages"),
           // Merged in http-proxy setupOutgoing() before the upstream request is created — avoids a
           // race where proxyReq.setHeader in a proxyReq listener runs after req.pipe(proxyReq) began.
           headers: {
