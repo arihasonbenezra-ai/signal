@@ -490,7 +490,7 @@ xKey and yKeys must be exact column names from the dataset.`}]
     setAsking(false);
   };
 
-  const handleChartClick = (payload, _idx, event) => {
+  const handleChartClick = (payload) => {
     if (!analysis) return;
     const label = payload?.activeLabel||payload?.activePayload?.[0]?.payload?.[chartXKey]||payload?.name;
     if (!label) return;
@@ -734,7 +734,7 @@ xKey and yKeys must be exact column names from the dataset.`}]
                             </thead>
                             <tbody>
                               <tr>
-                                {Object.entries(card.stageTotals).map(([stage,count],si)=>(
+                                {Object.entries(card.stageTotals).map(([stage,count])=>(
                                   <td key={stage} style={{padding:"6px 10px",textAlign:"center",fontWeight:600,fontSize:13,color:count>0?T.navy:T.dim,background:count>0?T.tealLight:"transparent",borderRadius:6}}>
                                     {count||"—"}
                                   </td>
